@@ -12,7 +12,8 @@ contextBridge.exposeInMainWorld('api', {
   saveTemplate:(data:any)=>ipcRenderer.invoke('templates:save',data),
   copyTemplate:(text:string)=>ipcRenderer.invoke('templates:copy',text),
   openFloating:(id:string)=>ipcRenderer.invoke('window:open-floating',id),
-  openMain:()=>ipcRenderer.invoke('window:open-main'),
+  toggleFloatingPin:()=>ipcRenderer.invoke('window:toggle-floating-pin'),
+  openMain:(incidentId?:string)=>ipcRenderer.invoke('window:open-main',incidentId),
   closeFloating:(id:string)=>ipcRenderer.invoke('window:close-floating',id),
   notify:(data:any)=>ipcRenderer.invoke('notifications:show',data),
   importExcel:(path:string)=>ipcRenderer.invoke('excel:import',path),
@@ -23,6 +24,7 @@ contextBridge.exposeInMainWorld('api', {
   exportExcelTemplate:()=>ipcRenderer.invoke('excel:export-template'),
   onTasksUpdated:(callback:(incidentId:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,id:string)=>void=(_event,id)=>callback(id);ipcRenderer.on('tasks:updated',listener);return()=>ipcRenderer.removeListener('tasks:updated',listener);},
   onIncidentsUpdated:(callback:(incidentId:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,id:string)=>void=(_event,id)=>callback(id);ipcRenderer.on('incidents:updated',listener);return()=>ipcRenderer.removeListener('incidents:updated',listener);},
+  onFocusIncident:(callback:(incidentId:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,id:string)=>void=(_event,id)=>callback(id);ipcRenderer.on('window:focus-incident',listener);return()=>ipcRenderer.removeListener('window:focus-incident',listener);},
   onConfigUpdated:(callback:(result:any)=>void)=>{const listener:(_:Electron.IpcRendererEvent,result:any)=>void=(_event,result)=>callback(result);ipcRenderer.on('config:updated',listener);return()=>ipcRenderer.removeListener('config:updated',listener);},
   onConfigError:(callback:(message:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,message:string)=>void=(_event,message)=>callback(message);ipcRenderer.on('config:error',listener);return()=>ipcRenderer.removeListener('config:error',listener);}
 });

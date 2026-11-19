@@ -17,3 +17,20 @@
 .resolve-button:hover{background:#a93631}
 .resolved-message{margin:10px 0;text-align:center;color:#397965;font-size:10px;font-weight:700}
 .task-mini:disabled{cursor:default;opacity:.8}
+.floating-mode,.floating-mode body,.floating-mode #root{width:100%;height:100%;margin:0;overflow:hidden;background:transparent!important}
+.floating{height:100vh;padding:8px;border-radius:14px;background:rgba(232,247,244,.72);border-color:rgba(151,198,189,.72);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
+.floating .clock-wrap{width:138px;margin:0 auto}
+.floating .clock-meta{margin-top:-3px}
+.floating .dragbar{height:24px;margin:0 -1px 3px;cursor:move;user-select:none}
+.drag-title{flex:1;height:100%;display:flex;align-items:center;padding-left:4px}
+.window-controls{display:flex;gap:3px;-webkit-app-region:no-drag}
+.window-control{width:25px;height:24px;border:0;border-radius:6px;background:transparent;color:#688b84;display:grid;place-items:center;cursor:pointer;-webkit-app-region:no-drag}
+.window-control:hover{background:rgba(255,255,255,.65)}
+.window-control.pinned{color:#167a6f;background:rgba(255,255,255,.52)}
+.floating .floating-title{font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0 0 4px}
+.floating .floating-tasks{max-height:91px;margin:4px 0;scrollbar-width:thin}
+.floating .task-mini{min-height:35px;padding:6px 7px;margin:3px 0;background:rgba(255,255,255,.76)}
+.floating .task-mini.overdue{background:rgba(255,239,236,.9)}
+.floating .task-mini.done{background:rgba(239,249,245,.86)}
+.floating .resolve-button{margin-top:5px;padding:8px;font-size:10px}
+.floating .full-button{padding:8px;margin-top:5px;font-size:10px}

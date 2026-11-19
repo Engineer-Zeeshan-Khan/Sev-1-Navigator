@@ -291,6 +291,7 @@ function createMainWindow() {
     width: 1420, height: 900, minWidth: 1050, minHeight: 700,
     webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
+  mainWindow.on('closed',()=>{mainWindow=null;});
   if (process.env.ELECTRON_RENDERER_URL) mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   else mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
 }
@@ -299,8 +300,8 @@ function createFloating(incidentId: string) {
   const existing = floatingWindows.get(incidentId);
   if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return; }
   const win = new BrowserWindow({
-    width: 340, height: 440, minWidth: 300, minHeight: 320,
-    frame: false, transparent: true, resizable: true, alwaysOnTop: true,
+    width: 240, height: 360, minWidth: 210, minHeight: 300,
+    frame: false, transparent: true, resizable: true, alwaysOnTop: false,
     skipTaskbar: true, hasShadow: true,
     webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
@@ -360,7 +361,8 @@ ipcMain.handle('templates:save',(_e,t)=>{
 });
 ipcMain.handle('templates:copy',(_e,text)=>{ require('electron').clipboard.writeText(text); return true; });
 ipcMain.handle('window:open-floating',(_e,id)=>{createFloating(id);return true;});
-ipcMain.handle('window:open-main',()=>{if(mainWindow){mainWindow.show();mainWindow.focus();}});
+ipcMain.handle('window:toggle-floating-pin',(event)=>{const win=BrowserWindow.fromWebContents(event.sender);if(!win||win.isDestroyed())return false;const pinned=!win.isAlwaysOnTop();win.setAlwaysOnTop(pinned,pinned?'floating':'normal');if(process.platform==='darwin')win.setVisibleOnAllWorkspaces(pinned,{visibleOnFullScreen:pinned});return pinned;});
+ipcMain.handle('window:open-main',(_event,incidentId?:string)=>{if(!mainWindow||mainWindow.isDestroyed())createMainWindow();const win=mainWindow;if(!win)return false;const focusWindow=()=>{if(win.isDestroyed())return;win.show();win.focus();app.focus({steal:true});if(incidentId)win.webContents.send('window:focus-incident',incidentId);};if(win.webContents.isLoading())win.webContents.once('did-finish-load',()=>setTimeout(focusWindow,100));else setTimeout(focusWindow,50);return true;});
 ipcMain.handle('window:close-floating',(_e,id)=>{const w=floatingWindows.get(id);if(w)w.close();});
 ipcMain.handle('notifications:show',(_e,{title,body})=>{if(Notification.isSupported())new Notification({title,body}).show();});
 ipcMain.handle('excel:import',async(_e,filePath)=>{
