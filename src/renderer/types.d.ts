@@ -10,5 +10,9 @@ declare global {
     openMain:()=>Promise<void>; closeFloating:(id:string)=>Promise<void>;
     notify:(data:any)=>Promise<void>; importExcel:(path:string)=>Promise<any>; getConfigPath:()=>Promise<string>; openConfigFolder:()=>Promise<string>; reloadConfig:()=>Promise<any>;
     exportExcelTemplate:()=>Promise<any>; chooseAndImportExcel:()=>Promise<any>;
+    onTasksUpdated:(callback:(incidentId:string)=>void)=>()=>void;
+    onIncidentsUpdated:(callback:(incidentId:string)=>void)=>()=>void;
+    onConfigUpdated:(callback:(result:any)=>void)=>()=>void;
+    onConfigError:(callback:(message:string)=>void)=>()=>void;
   }}
 }

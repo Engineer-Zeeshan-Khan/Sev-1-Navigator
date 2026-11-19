@@ -20,5 +20,9 @@ contextBridge.exposeInMainWorld('api', {
   getConfigPath:()=>ipcRenderer.invoke('excel:config-path'),
   openConfigFolder:()=>ipcRenderer.invoke('excel:open-config-folder'),
   reloadConfig:()=>ipcRenderer.invoke('excel:reload-config'),
-  exportExcelTemplate:()=>ipcRenderer.invoke('excel:export-template')
+  exportExcelTemplate:()=>ipcRenderer.invoke('excel:export-template'),
+  onTasksUpdated:(callback:(incidentId:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,id:string)=>void=(_event,id)=>callback(id);ipcRenderer.on('tasks:updated',listener);return()=>ipcRenderer.removeListener('tasks:updated',listener);},
+  onIncidentsUpdated:(callback:(incidentId:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,id:string)=>void=(_event,id)=>callback(id);ipcRenderer.on('incidents:updated',listener);return()=>ipcRenderer.removeListener('incidents:updated',listener);},
+  onConfigUpdated:(callback:(result:any)=>void)=>{const listener:(_:Electron.IpcRendererEvent,result:any)=>void=(_event,result)=>callback(result);ipcRenderer.on('config:updated',listener);return()=>ipcRenderer.removeListener('config:updated',listener);},
+  onConfigError:(callback:(message:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,message:string)=>void=(_event,message)=>callback(message);ipcRenderer.on('config:error',listener);return()=>ipcRenderer.removeListener('config:error',listener);}
 });

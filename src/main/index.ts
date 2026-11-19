@@ -2,11 +2,46 @@ import { app, BrowserWindow, ipcMain, shell, Notification } from 'electron';
 import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import ExcelJS from 'exceljs';
-import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, watch, FSWatcher } from 'node:fs';
 
 let db: Database.Database;
 let mainWindow: BrowserWindow | null = null;
 let floatingWindows = new Map<string, BrowserWindow>();
+let configWatcher: FSWatcher | null = null;
+let configReloadTimer: NodeJS.Timeout | null = null;
+
+function broadcast(channel: string, payload: unknown) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, payload);
+  }
+}
+
+function broadcastConfigUpdated(result: unknown) {
+  broadcast('config:updated', result);
+}
+
+function watchConfigWorkbook() {
+  const target = configWorkbookPath();
+  try {
+    configWatcher?.close();
+    configWatcher = watch(app.getPath('userData'), (_event, filename) => {
+      if (filename && String(filename) !== 'SEV1-Command-Center-Configuration.xlsx') return;
+      if (configReloadTimer) clearTimeout(configReloadTimer);
+      configReloadTimer = setTimeout(async () => {
+        if (!existsSync(target)) return;
+        try {
+          const result = await importWorkbookFile(target);
+          broadcastConfigUpdated(result);
+        } catch (error) {
+          console.error('Configuration workbook was not applied:', error);
+          broadcast('config:error', error instanceof Error ? error.message : String(error));
+        }
+      }, 700);
+    });
+  } catch (error) {
+    console.error('Could not watch configuration workbook:', error);
+  }
+}
 
 
 function configWorkbookPath() {
@@ -141,7 +176,7 @@ const parse = (ws: ExcelJS.Worksheet) => {
       ON CONFLICT(id) DO UPDATE SET due_minutes=excluded.due_minutes,name=excluded.name,description=excluded.description,mandatory=excluded.mandatory,phase=excluded.phase,display_order=excluded.display_order,active=excluded.active`);
     acts.forEach((r:any,i:number)=>{
       if(!r['Task ID']||!r['Activity Name']||!Number.isFinite(Number(r['Due Minutes']))||Number(r['Due Minutes'])<0)throw new Error(`Invalid Activities row ${i+2}`);
-      ai.run({id:String(r['Task ID']),due_minutes:Number(r['Due Minutes']),name:String(r['Activity Name']),description:String(r['Description']||''),mandatory:/^(yes|true|1)$/i.test(String(r['Mandatory'])),phase:String(r['Phase']||'General'),display_order:Number(r['Display Order']||i),active:/^(yes|true|1)$/i.test(String(r['Active']??'Yes'))?1:0});
+      ai.run({id:String(r['Task ID']),due_minutes:Number(r['Due Minutes']),name:String(r['Activity Name']),description:String(r['Description']||''),mandatory:/^(yes|true|1)$/i.test(String(r['Mandatory']))?1:0,phase:String(r['Phase']||'General'),display_order:Number(r['Display Order']||i),active:/^(yes|true|1)$/i.test(String(r['Active']??'Yes'))?1:0});
     });
     const ti=db.prepare(`INSERT INTO tools VALUES (@id,@name,@url,@description,@category,@display_order,@active)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,description=excluded.description,category=excluded.category,display_order=excluded.display_order,active=excluded.active`);
@@ -295,10 +330,15 @@ ipcMain.handle('tasks:complete',(_e,{taskId,incidentId,complete})=>{
   const at = complete ? Date.now() : null;
   db.prepare('UPDATE incident_tasks SET completed_at=?, skipped=0 WHERE id=? AND incident_id=?').run(at,taskId,incidentId);
   db.prepare('INSERT INTO incident_events VALUES (?,?,?,?,?)').run(`${incidentId}-${Date.now()}`,incidentId,Date.now(),complete?'task_completed':'task_reopened',taskId);
+  broadcast('tasks:updated', incidentId);
   return true;
 });
 ipcMain.handle('incidents:resolve',(_e,id)=>{
-  db.prepare("UPDATE incidents SET status='resolved',end_at=? WHERE id=?").run(Date.now(),id); return true;
+  const totals=db.prepare('SELECT COUNT(*) AS total, SUM(CASE WHEN completed_at IS NOT NULL THEN 1 ELSE 0 END) AS completed FROM incident_tasks WHERE incident_id=?').get(id) as {total:number;completed:number|null};
+  if (!totals.total || totals.completed !== totals.total) throw new Error('Complete every response checklist item before resolving this SEV-1.');
+  db.prepare("UPDATE incidents SET status='resolved',end_at=? WHERE id=? AND status='active'").run(Date.now(),id);
+  broadcast('incidents:updated',id);
+  return true;
 });
 ipcMain.handle('tools:list',()=>db.prepare('SELECT * FROM tools WHERE active=1 ORDER BY display_order').all());
 ipcMain.handle('tools:save',(_e,tool)=>{
@@ -326,6 +366,7 @@ ipcMain.handle('notifications:show',(_e,{title,body})=>{if(Notification.isSuppor
 ipcMain.handle('excel:import',async(_e,filePath)=>{
   const result=await importWorkbookFile(filePath);
   if(resolve(filePath)!==resolve(configWorkbookPath())) copyFileSync(filePath,configWorkbookPath());
+  broadcastConfigUpdated(result);
   return result;
 });
 ipcMain.handle('excel:choose-import',async()=>{
@@ -335,11 +376,12 @@ ipcMain.handle('excel:choose-import',async()=>{
   const filePath=result.filePaths[0];
   const imported=await importWorkbookFile(filePath);
   if(resolve(filePath)!==resolve(configWorkbookPath()))copyFileSync(filePath,configWorkbookPath());
+  broadcastConfigUpdated(imported);
   return {canceled:false,...imported,path:configWorkbookPath()};
 });
 ipcMain.handle('excel:config-path',()=>configWorkbookPath());
 ipcMain.handle('excel:open-config-folder',async()=>{await shell.openPath(app.getPath('userData'));return configWorkbookPath();});
-ipcMain.handle('excel:reload-config',async()=>{const p=configWorkbookPath();if(!existsSync(p))throw new Error('Configuration workbook not found in the application data folder.');return importWorkbookFile(p);});
+ipcMain.handle('excel:reload-config',async()=>{const p=configWorkbookPath();if(!existsSync(p))throw new Error('Configuration workbook not found in the application data folder.');const result=await importWorkbookFile(p);broadcastConfigUpdated(result);return result;});
 ipcMain.handle('excel:export-template',async()=>{
   const {dialog}=require('electron');
   const result=await dialog.showSaveDialog({defaultPath:configWorkbookPath(),filters:[{name:'Excel Workbook',extensions:['xlsx']}]});
@@ -368,6 +410,6 @@ ipcMain.handle('excel:export-template',async()=>{
   ]);
   await wb.xlsx.writeFile(result.filePath); return {canceled:false,path:result.filePath};
 });
-app.whenReady().then(async()=>{initDb();await loadStartupWorkbook();createMainWindow();app.on('activate',()=>{if(BrowserWindow.getAllWindows().length===0)createMainWindow();});});
+app.whenReady().then(async()=>{initDb();await loadStartupWorkbook();watchConfigWorkbook();createMainWindow();app.on('activate',()=>{if(BrowserWindow.getAllWindows().length===0)createMainWindow();});});
 app.on('window-all-closed',()=>{if(process.platform!=='darwin')app.quit();});
 app.on('before-quit',()=>{try{db?.close();}catch{}});
