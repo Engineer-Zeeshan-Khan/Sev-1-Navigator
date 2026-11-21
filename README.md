@@ -126,6 +126,8 @@ Each command compiles the app and packages one architecture. The installer files
 - `Sev-1 Navigator-<version>-arm64.pkg` for Apple Silicon Macs
 - `Sev-1 Navigator-<version>-x64.pkg` for Intel Macs
 
+After a successful package build, the packaging script removes electron-builder's temporary metadata and keeps only `.pkg` installers in `release/`. It also disables automatic macOS signing identity discovery because these installers are unsigned.
+
 Keep the installers out of Git commits. These packages are unsigned and not notarized, so macOS may show a security warning during installation. Do not tell recipients to bypass a warning unless they trust the installer source and their organization allows it.
 
 ## Sharing the app

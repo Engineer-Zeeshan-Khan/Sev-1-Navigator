@@ -9,7 +9,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "package": "npm run build && electron-builder",
+    "package": "node scripts/package.cjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
