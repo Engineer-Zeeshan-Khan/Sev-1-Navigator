@@ -42,8 +42,9 @@
       "SEV1-Command-Center-Configuration.xlsx"
     ],
     "mac": {
+      "icon": "build/icon.icns",
       "target": [
-        "dmg"
+        "pkg"
       ]
     },
     "win": {
