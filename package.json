@@ -5,6 +5,7 @@
   "description": "Local desktop SEV-1 incident response navigator",
   "main": "out/main/index.js",
   "scripts": {
+    "predev": "node scripts/ensure-electron.cjs",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",

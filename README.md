@@ -91,7 +91,16 @@ npm run build
 npm run dev
 ```
 
-`npm ci` installs the exact dependency versions from `package-lock.json`. `npm run typecheck` checks the TypeScript types, and `npm run build` compiles the Electron main process, preload, and React renderer into `out/`. `npm run dev` starts the desktop app against the local Vite development server.
+`npm ci` installs the exact dependency versions from `package-lock.json`, including downloading Electron's platform runtime. `npm run typecheck` checks the TypeScript types, and `npm run build` compiles the Electron main process, preload, and React renderer into `out/`. Before starting the development server, `npm run dev` checks that the Electron runtime is present and downloads it if a previous dependency install skipped that step. This also repairs the common `Error: Electron uninstall` startup failure automatically.
+
+Electron's runtime download requires network access. If `npm ci` or the runtime download fails, retry after restoring network access. If npm was configured to skip package install scripts, `npm run dev` will still try to install Electron; you can also repair it manually with:
+
+```bash
+npm rebuild electron
+npm run dev
+```
+
+If npm continues skipping install scripts, remove that setting with `npm config delete ignore-scripts` and rerun `npm ci`.
 
 If your shell has `ELECTRON_RUN_AS_NODE` set, unset it when starting Electron:
 
