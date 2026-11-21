@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, Notification, session } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, Notification, session, screen } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import { basename, dirname, join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
@@ -409,8 +409,13 @@ function createFloating(incidentId: string) {
   const existing = floatingWindows.get(incidentId);
   if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return; }
   // The compact transparent clock is pinned by default; macOS workspace visibility follows its pin state.
+  // Place it in the top-right of the display where the user opened it, inside the usable work area.
+  const { x: areaX, y: areaY, width: areaWidth } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  const width = 240;
+  const margin = 16;
   const win = new BrowserWindow({
-    width: 240, height: 360, minWidth: 210, minHeight: 300,
+    x: areaX + areaWidth - width - margin, y: areaY + margin,
+    width, height: 360, minWidth: 210, minHeight: 300,
     frame: false, transparent: true, resizable: true, alwaysOnTop: true,
     skipTaskbar: true, hasShadow: true,
     webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, webviewTag: false, devTools: !app.isPackaged }
