@@ -1,6 +1,6 @@
 {
   "name": "sev-1-navigator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Local desktop SEV-1 incident response navigator",
   "main": "out/main/index.js",
@@ -42,6 +42,7 @@
     "productName": "Sev-1 Navigator",
     "asar": true,
     "electronFuses": {
+      "resetAdHocDarwinSignature": true,
       "runAsNode": false,
       "enableNodeOptionsEnvironmentVariable": false,
       "enableNodeCliInspectArguments": false,
