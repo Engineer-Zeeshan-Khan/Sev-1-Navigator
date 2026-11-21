@@ -4,22 +4,27 @@ import {Activity,AppWindow,BookCopy,CheckCircle2,Copy,ExternalLink,History,Pin,P
 type Incident={id:string;title:string;severity:string;start_at:number;sla_minutes:number;status:string;end_at?:number;incident_number?:string;organization?:string};
 type Task={id:string;incident_id:string;due_minutes:number;name:string;description:string;mandatory:number;phase:string;completed_at:number|null;skipped:number};
 const fmt=(s:number)=>`${String(Math.floor(s/60)).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+// The floating clock reuses the same React app and selects its incident from the URL hash.
 const isFloating=location.hash.startsWith('#/floating/');
 const floatingId=decodeURIComponent(location.hash.split('/')[2]||'');
 document.documentElement.classList.toggle('floating-mode',isFloating);
 export default function App(){
+ // Keep server-owned records in component state; `active`, elapsed time, and task colors are derived below.
  const [tab,setTab]=useState('dashboard'),[incidents,setIncidents]=useState<Incident[]>([]),[selected,setSelected]=useState(''),[tasks,setTasks]=useState<Task[]>([]),[tools,setTools]=useState<any[]>([]),[templates,setTemplates]=useState<any[]>([]),[now,setNow]=useState(Date.now()),[incidentNumber,setIncidentNumber]=useState(''),[organization,setOrganization]=useState(''),[showCreateForm,setShowCreateForm]=useState(false),[newSla,setNewSla]=useState(60),[notice,setNotice]=useState(''),[pinned,setPinned]=useState(true);
  const active=incidents.find(i=>i.id===(isFloating?floatingId:selected));
  const timerEnd=active?.status==='resolved'&&active.end_at?active.end_at:now;
+ // Derive the timer from persisted timestamps rather than incrementing state, so it survives window refreshes.
  const elapsed=active?Math.max(0,Math.floor((timerEnd-active.start_at)/1000)):0;
  const remaining=active?active.sla_minutes*60-elapsed:0;
  const allTasksComplete=tasks.length>0&&tasks.every(t=>Boolean(t.completed_at));
+ // Checklist urgency is based on each task's due time; completed tasks retain their completed state.
  const taskState=(t:Task)=>t.completed_at?'done':elapsed>=t.due_minutes*60?'overdue':'upcoming';
  const reload=async()=>{const [i,t,tm]=await Promise.all([window.api.listIncidents(),window.api.listTools(),window.api.listTemplates()]);setIncidents(i);setTools(t);setTemplates(tm);};
  const loadTasks=async(id:string)=>setTasks(await window.api.listTasks(id));
  useEffect(()=>{reload();const h=setInterval(()=>setNow(Date.now()),500);return()=>clearInterval(h);},[]);
  useEffect(()=>{if(isFloating&&floatingId){setSelected(floatingId);loadTasks(floatingId);}},[]);
  useEffect(()=>{if(selected)loadTasks(selected);},[selected]);
+ // IPC broadcasts keep the dashboard and floating window synchronized after actions in either window.
  useEffect(()=>{const offTasks=window.api.onTasksUpdated(id=>{if(id===(isFloating?floatingId:selected))loadTasks(id);});const offIncidents=window.api.onIncidentsUpdated(async id=>{await reload();if(!isFloating&&id===selected){setSelected('');setTasks([]);setTab('history');}});const offFocus=window.api.onFocusIncident(id=>{if(!isFloating){setSelected(id);setTab('dashboard');}});const offConfig=window.api.onConfigUpdated(async result=>{await reload();setNotice(`Workbook updated: ${result.activities} activities, ${result.tools} tools and ${result.templates} templates loaded`);});const offError=window.api.onConfigError(message=>setNotice(`Workbook update failed: ${message}`));return()=>{offTasks();offIncidents();offFocus();offConfig();offError();};},[selected]);
  useEffect(()=>{if(active&&active.status==='active'&&remaining<=0&&remaining>-1)window.api.notify({title:'SEV1 SLA deadline reached',body:active.id});},[Math.floor(remaining)]);
  const create=async()=>{const number=incidentNumber.trim(),org=organization.trim();if(!number||!org)return;const i=await window.api.createIncident({title:number,incidentNumber:number,organization:org,severity:'SEV1',slaMinutes:newSla});await reload();setSelected(i.id);setTab('dashboard');setShowCreateForm(false);setIncidentNumber('');setOrganization('');};
@@ -31,6 +36,7 @@ export default function App(){
  const color=pct>=.88?'#ef6666':pct>=.75?'#e9ad54':'#53cdb9';
  const urgent=tasks.filter(t=>!t.completed_at&&elapsed>=t.due_minutes*60);
  const clock=<div className="clock-wrap"><svg viewBox="0 0 240 240" className="clock"><circle cx="120" cy="120" r="91" fill="none" stroke="#dcebe9" strokeWidth="9"/>{Array.from({length:60},(_,i)=>{const a=(i/60)*Math.PI*2-Math.PI/2;const x=120+91*Math.cos(a),y=120+91*Math.sin(a);const lit=active&&elapsed>=i*60;return <circle key={i} cx={x} cy={y} r={i%5===0?4:2.8} fill={lit?(i>=53?'#ef6666':i>=45?'#e9ad54':'#53cdb9'):'#d4e1df'} opacity={lit?1:.75}/>})}<circle cx="120" cy="120" r="72" fill="#f4fbfa" stroke="#d9eeea"/><text x="120" y="112" textAnchor="middle" className="clock-time">{active?fmt(elapsed):'00:00'}</text><text x="120" y="137" textAnchor="middle" className="clock-label">ELAPSED</text></svg><div className="clock-meta"><span style={{color}}>{active?fmt(Math.max(0,remaining)):'--:--'}</span><small>REMAINING SLA</small></div></div>;
+ // Render a compact, draggable incident timer when this BrowserWindow opens the floating route.
  if(isFloating)return <div className="floating"><div className="dragbar"><span className="drag-title">SEV-1 NAVIGATOR</span><div className="window-controls"><button className={`window-control ${pinned?'pinned':''}`} title={pinned?'Unpin window':'Pin window on top'} aria-label={pinned?'Unpin window':'Pin window on top'} onClick={togglePin}>{pinned?<Pin size={14}/>:<PinOff size={14}/>}</button><button className="window-control" title="Close popup" aria-label="Close popup" onClick={()=>window.api.closeFloating(floatingId)}><X size={14}/></button></div></div>{clock}<div className="floating-title"><b>{active?.incident_number||active?.title||active?.id||'Loading incident'}</b><span>{active?.organization||'Organization not set'}</span><small>{active?.status==='resolved'?'RESOLVED':'RESPONSE CHECKLIST'}</small></div><div className="floating-tasks">{tasks.length?tasks.map(t=><button className={`task-mini ${taskState(t)}`} onClick={()=>complete(t)} key={t.id} disabled={active?.status==='resolved'}><span><b>{t.name}</b><small>Due at {t.due_minutes} min · {t.phase||'General'}</small></span>{t.completed_at?<CheckCircle2 size={16}/>:<span className="mini-status">{taskState(t)==='overdue'?'DUE':'OPEN'}</span>}</button>):<div className="empty">Loading response checklist…</div>}</div>{active?.status==='active'&&allTasksComplete&&<button className="resolve-button" onClick={resolve}>Resolve SEV-1</button>}{active?.status==='resolved'&&<div className="resolved-message">Incident resolved · timer stopped</div>}<button className="full-button" onClick={()=>window.api.openMain(floatingId)}>Open dashboard</button></div>;
  return <div className="app">
   <aside className="sidebar"><div className="brand"><div className="brand-icon"><ShieldAlert/></div><div><b>SEV-1 NAVIGATOR</b><small>INCIDENT RESPONSE</small></div></div>

@@ -1,9 +1,11 @@
-import { app, BrowserWindow, ipcMain, shell, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, shell, Notification, session } from 'electron';
+import type { IpcMainInvokeEvent } from 'electron';
 import { basename, dirname, join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import ExcelJS from 'exceljs';
-import { existsSync, mkdirSync, copyFileSync, watch, watchFile, unwatchFile, FSWatcher } from 'node:fs';
+import { existsSync, mkdirSync, chmodSync, copyFileSync, watch, watchFile, unwatchFile, FSWatcher } from 'node:fs';
 
+// The main process owns persistent data and creates every BrowserWindow.
 let db: Database.Database;
 let mainWindow: BrowserWindow | null = null;
 let floatingWindows = new Map<string, BrowserWindow>();
@@ -11,7 +13,65 @@ let configWatcher: FSWatcher | null = null;
 let configReloadTimer: NodeJS.Timeout | null = null;
 let watchedWorkbookPath: string | null = null;
 
+function rendererDevelopmentUrl(): URL | null {
+  // Packaged apps must always load their bundled UI, even if their launch environment is modified.
+  if (app.isPackaged) return null;
+  const candidate = process.env.ELECTRON_RENDERER_URL;
+  if (!candidate) return null;
+
+  try {
+    const url = new URL(candidate);
+    const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+    if (url.protocol !== 'http:' || !loopbackHosts.has(url.hostname) || url.username || url.password) {
+      throw new Error('Development renderer must use an unauthenticated loopback HTTP URL.');
+    }
+    return url;
+  } catch {
+    console.error('Ignoring invalid ELECTRON_RENDERER_URL; only a local development server is allowed.');
+    return null;
+  }
+}
+
+function secureRendererWindow(win: BrowserWindow) {
+  // This app never embeds external pages; web links are opened explicitly in the system browser.
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, destination) => {
+    const devUrl = rendererDevelopmentUrl();
+    let isAllowedDevNavigation = false;
+    try {
+      isAllowedDevNavigation = Boolean(devUrl && new URL(destination).origin === devUrl.origin);
+    } catch {
+      // Block malformed navigation targets.
+    }
+    if (!isAllowedDevNavigation) event.preventDefault();
+  });
+}
+
+function handleAppIpc(
+  channel: string,
+  handler: (event: IpcMainInvokeEvent, ...args: any[]) => unknown
+) {
+  ipcMain.handle(channel, (event, ...args) => {
+    const isKnownWindow = BrowserWindow.getAllWindows().some(win => win.webContents === event.sender);
+    if (!isKnownWindow || event.senderFrame !== event.sender.mainFrame) {
+      throw new Error('IPC request rejected: sender is not an application window.');
+    }
+    return handler(event, ...args);
+  });
+}
+
+function restrictLocalDataPermissions(path: string, mode: number) {
+  // POSIX permissions keep incident records and workbook data private to the current macOS/Linux user.
+  if (process.platform === 'win32') return;
+  try {
+    chmodSync(path, mode);
+  } catch (error) {
+    console.warn('Could not restrict local application data permissions:', error);
+  }
+}
+
 function broadcast(channel: string, payload: unknown) {
+  // Dashboard and floating windows share the same incident state; refresh both after writes.
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, payload);
   }
@@ -24,9 +84,11 @@ function broadcastConfigUpdated(result: unknown) {
 function watchConfigWorkbook() {
   const target = getActiveWorkbookPath();
   try {
+    // Excel may save by replacing the file, so watch its directory as well as its metadata.
     configWatcher?.close();
     if (watchedWorkbookPath) unwatchFile(watchedWorkbookPath);
     const scheduleReload = () => {
+      // Debounce the two filesystem notifications Excel commonly emits for a single save.
       if (configReloadTimer) clearTimeout(configReloadTimer);
       configReloadTimer = setTimeout(async () => {
         if (!existsSync(target)) return;
@@ -54,6 +116,7 @@ function watchConfigWorkbook() {
 
 
 function configWorkbookPath() {
+  // Keep the editable workbook in the per-user data folder, not inside the installed app bundle.
   return join(app.getPath('userData'), 'SEV1-Command-Center-Configuration.xlsx');
 }
 
@@ -72,6 +135,7 @@ function safeSqliteInsert(
   sheet: string,
   row: number
 ) {
+  // Convert Excel cell values to SQLite-compatible values and attach sheet/row context to errors.
   const safeParams: Record<string, any> = {};
 
   for (const [key, value] of Object.entries(params)) {
@@ -105,6 +169,7 @@ function safeSqliteInsert(
 }
 
 async function importWorkbookFile(filePath: string) {
+  // Read all three configuration sheets before changing SQLite, then apply them as one transaction.
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
   const activitySheet = workbook.getWorksheet('Activities');
@@ -112,6 +177,7 @@ async function importWorkbookFile(filePath: string) {
   const templateSheet = workbook.getWorksheet('Communication Templates');
   if (!activitySheet || !toolSheet || !templateSheet) throw new Error('Workbook must contain Activities, Tools and Communication Templates sheets.');
   
+// ExcelJS represents formulas, hyperlinks, and rich text as objects; flatten them for storage.
 const normalizeExcelValue = (value: any): string | number | null => {
   if (value === null || value === undefined) return null;
 
@@ -154,6 +220,7 @@ const normalizeExcelValue = (value: any): string | number | null => {
   return String(value);
 };
 
+// Use the first row as named columns so workbook column order can change safely.
 const parse = (ws: ExcelJS.Worksheet) => {
   const headers: string[] = [];
 
@@ -186,7 +253,7 @@ const parse = (ws: ExcelJS.Worksheet) => {
 
   const acts=parse(activitySheet), tools=parse(toolSheet), temps=parse(templateSheet);
   const tx=db.transaction(()=>{
-    // Rows removed from the workbook are retained in SQLite but deactivated for future incidents.
+    // Stable IDs let edits update existing configuration; missing rows are kept but disabled.
     db.prepare('UPDATE activities SET active=0').run();
     db.prepare('UPDATE tools SET active=0').run();
     db.prepare('UPDATE templates SET active=0').run();
@@ -213,6 +280,7 @@ const parse = (ws: ExcelJS.Worksheet) => {
   return {activities:acts.length,tools:tools.length,templates:temps.length};
 }
 async function loadStartupWorkbook() {
+  // Prefer a saved workbook path; otherwise use the development workbook or the managed user copy.
   const managed=configWorkbookPath();
   const saved=db.prepare("SELECT value FROM app_settings WHERE key='workbook_path'").get() as {value:string}|undefined;
   const developmentWorkbook=join(app.getAppPath(),'SEV1-Command-Center-Configuration.xlsx');
@@ -221,6 +289,7 @@ async function loadStartupWorkbook() {
     const bundled=join(app.getAppPath(),'SEV1-Command-Center-Configuration.xlsx');
     if(existsSync(bundled)) copyFileSync(bundled,managed);
   }
+  if(existsSync(managed)) restrictLocalDataPermissions(managed,0o600);
   if(!existsSync(target)) target=managed;
   setActiveWorkbookPath(target);
   if(existsSync(target)) {
@@ -233,9 +302,13 @@ async function loadStartupWorkbook() {
 }
 
 function initDb() {
+  // SQLite is local to this user and cascades task/event cleanup if an incident ages out of history.
   const dir = app.getPath('userData');
   mkdirSync(dir, { recursive: true });
-  db = new Database(join(dir, 'sev1-command-center.sqlite'));
+  restrictLocalDataPermissions(dir,0o700);
+  const databasePath=join(dir, 'sev1-command-center.sqlite');
+  db = new Database(databasePath);
+  restrictLocalDataPermissions(databasePath,0o600);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(`
@@ -273,6 +346,7 @@ function initDb() {
     );
   `);
   const incidentColumns=db.prepare('PRAGMA table_info(incidents)').all() as {name:string}[];
+  // Add columns for users upgrading from an earlier database without discarding incident history.
   if(!incidentColumns.some(column=>column.name==='incident_number'))db.exec("ALTER TABLE incidents ADD COLUMN incident_number TEXT NOT NULL DEFAULT ''");
   if(!incidentColumns.some(column=>column.name==='organization'))db.exec("ALTER TABLE incidents ADD COLUMN organization TEXT NOT NULL DEFAULT ''");
   db.prepare("UPDATE incidents SET incident_number=id WHERE incident_number IS NULL OR incident_number=''").run();
@@ -319,42 +393,51 @@ function initDb() {
 }
 
 function createMainWindow() {
+  // Keep privileged Node APIs out of the renderer; all access goes through the preload bridge.
   mainWindow = new BrowserWindow({
     width: 1420, height: 900, minWidth: 1050, minHeight: 700,
-    webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
+    webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, webviewTag: false, devTools: !app.isPackaged }
   });
+  secureRendererWindow(mainWindow);
   mainWindow.on('closed',()=>{mainWindow=null;});
-  if (process.env.ELECTRON_RENDERER_URL) mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+  const devUrl = rendererDevelopmentUrl();
+  if (devUrl) mainWindow.loadURL(devUrl.href);
   else mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
 }
 
 function createFloating(incidentId: string) {
   const existing = floatingWindows.get(incidentId);
   if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return; }
+  // The compact transparent clock is pinned by default; macOS workspace visibility follows its pin state.
   const win = new BrowserWindow({
     width: 240, height: 360, minWidth: 210, minHeight: 300,
     frame: false, transparent: true, resizable: true, alwaysOnTop: true,
     skipTaskbar: true, hasShadow: true,
-    webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
+    webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, webviewTag: false, devTools: !app.isPackaged }
   });
+  secureRendererWindow(win);
   if(process.platform==='darwin')win.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true});
   floatingWindows.set(incidentId, win);
   win.on('closed',()=>floatingWindows.delete(incidentId));
-  const url = process.env.ELECTRON_RENDERER_URL;
-  if (url) win.loadURL(`${url}#/floating/${encodeURIComponent(incidentId)}`);
+  const devUrl = rendererDevelopmentUrl();
+  if (devUrl) win.loadURL(`${devUrl.href}#/floating/${encodeURIComponent(incidentId)}`);
   else win.loadFile(join(__dirname, '../renderer/index.html'), { hash: `/floating/${encodeURIComponent(incidentId)}` });
 }
 
-ipcMain.handle('incidents:list',()=>db.prepare("SELECT * FROM incidents ORDER BY start_at DESC").all());
-ipcMain.handle('incidents:create',(_e,input)=>{
+// IPC handlers below are the renderer's only route to database, operating-system, and workbook actions.
+handleAppIpc('incidents:list',()=>db.prepare("SELECT * FROM incidents ORDER BY start_at DESC").all());
+handleAppIpc('incidents:create',(_e,input)=>{
   const incidentNumber=String(input.incidentNumber||'').trim();
   const organization=String(input.organization||'').trim();
-  if(!incidentNumber||!organization)throw new Error('Incident number and organization name are required.');
+  if(!incidentNumber||!organization||incidentNumber.length>200||organization.length>200)throw new Error('Incident number and organization name are required (maximum 200 characters each).');
+  const requestedSla=Number(input.slaMinutes);
+  const slaMinutes=Number.isFinite(requestedSla)&&requestedSla>=1&&requestedSla<=1440?requestedSla:60;
   const id = `SEV1-${Date.now()}`;
   const start = Date.now();
   const tx = db.transaction(()=>{
     db.prepare('INSERT INTO incidents (id,title,severity,start_at,sla_minutes,status,incident_number,organization) VALUES (?,?,?,?,?,?,?,?)')
-      .run(id,input.title || incidentNumber,input.severity || 'SEV1',start,Number(input.slaMinutes)||60,'active',incidentNumber,organization);
+      .run(id,incidentNumber,'SEV1',start,slaMinutes,'active',incidentNumber,organization);
+    // Snapshot the current workbook activities so this incident's checklist remains stable afterward.
     const rows = db.prepare('SELECT * FROM activities WHERE active=1 ORDER BY display_order').all() as any[];
     const ins = db.prepare('INSERT INTO incident_tasks (id,incident_id,source_task_id,due_minutes,name,description,mandatory,phase) VALUES (?,?,?,?,?,?,?,?)');
     rows.forEach((r:any,i:number)=>ins.run(`${id}-TASK-${i+1}`,id,r.id,r.due_minutes,r.name,r.description,r.mandatory,r.phase));
@@ -363,46 +446,43 @@ ipcMain.handle('incidents:create',(_e,input)=>{
   });
   tx(); return db.prepare('SELECT * FROM incidents WHERE id=?').get(id);
 });
-ipcMain.handle('incidents:tasks',(e,id)=>db.prepare('SELECT * FROM incident_tasks WHERE incident_id=? ORDER BY due_minutes').all(id));
-ipcMain.handle('tasks:complete',(_e,{taskId,incidentId,complete})=>{
+handleAppIpc('incidents:tasks',(e,id)=>db.prepare('SELECT * FROM incident_tasks WHERE incident_id=? ORDER BY due_minutes').all(id));
+handleAppIpc('tasks:complete',(_e,{taskId,incidentId,complete})=>{
+  const incident=db.prepare("SELECT status FROM incidents WHERE id=?").get(incidentId) as {status:string}|undefined;
+  if(!incident||incident.status!=='active'||typeof complete!=='boolean')throw new Error('This checklist item cannot be changed.');
+  const task=db.prepare('SELECT id FROM incident_tasks WHERE id=? AND incident_id=?').get(taskId,incidentId);
+  if(!task)throw new Error('Checklist item not found for this incident.');
   const at = complete ? Date.now() : null;
   db.prepare('UPDATE incident_tasks SET completed_at=?, skipped=0 WHERE id=? AND incident_id=?').run(at,taskId,incidentId);
   db.prepare('INSERT INTO incident_events VALUES (?,?,?,?,?)').run(`${incidentId}-${Date.now()}`,incidentId,Date.now(),complete?'task_completed':'task_reopened',taskId);
   broadcast('tasks:updated', incidentId);
   return true;
 });
-ipcMain.handle('incidents:resolve',(_e,id)=>{
+handleAppIpc('incidents:resolve',(_e,id)=>{
+  // Enforce the resolve rule in the main process so UI state cannot bypass it.
   const totals=db.prepare('SELECT COUNT(*) AS total, SUM(CASE WHEN completed_at IS NOT NULL THEN 1 ELSE 0 END) AS completed FROM incident_tasks WHERE incident_id=?').get(id) as {total:number;completed:number|null};
   if (!totals.total || totals.completed !== totals.total) throw new Error('Complete every response checklist item before resolving this SEV-1.');
   db.prepare("UPDATE incidents SET status='resolved',end_at=? WHERE id=? AND status='active'").run(Date.now(),id);
   broadcast('incidents:updated',id);
   return true;
 });
-ipcMain.handle('tools:list',()=>db.prepare('SELECT * FROM tools WHERE active=1 ORDER BY display_order').all());
-ipcMain.handle('tools:save',(_e,tool)=>{
-  const u = new URL(tool.url);
-  if (!['http:','https:'].includes(u.protocol)) throw new Error('Only HTTP and HTTPS URLs are allowed.');
-  db.prepare(`INSERT INTO tools (id,name,url,description,category,display_order,active) VALUES (@id,@name,@url,@description,@category,@display_order,1)
-    ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url,description=excluded.description,category=excluded.category,display_order=excluded.display_order,active=1`).run(tool);
-  return true;
-});
-ipcMain.handle('tools:open',async(_e,url)=>{
+handleAppIpc('tools:list',()=>db.prepare('SELECT * FROM tools WHERE active=1 ORDER BY display_order').all());
+handleAppIpc('tools:open',async(_e,url)=>{
+  // Only allow web links to leave the app; never pass arbitrary protocols to the operating system.
+  if(typeof url!=='string'||url.length>2048)throw new Error('Invalid tool URL.');
   const u = new URL(url);
-  if (!['http:','https:'].includes(u.protocol)) throw new Error('Unsupported URL protocol');
+  if (!['http:','https:'].includes(u.protocol)||u.username||u.password) throw new Error('Unsupported URL. Only HTTP and HTTPS links without embedded credentials are allowed.');
   await shell.openExternal(u.toString()); return true;
 });
-ipcMain.handle('templates:list',()=>db.prepare('SELECT * FROM templates WHERE active=1 ORDER BY display_order').all());
-ipcMain.handle('templates:save',(_e,t)=>{
-  db.prepare(`INSERT INTO templates (id,stage,name,subject,body,display_order,active) VALUES (@id,@stage,@name,@subject,@body,@display_order,1)
-  ON CONFLICT(id) DO UPDATE SET stage=excluded.stage,name=excluded.name,subject=excluded.subject,body=excluded.body,display_order=excluded.display_order,active=1`).run(t); return true;
-});
-ipcMain.handle('templates:copy',(_e,text)=>{ require('electron').clipboard.writeText(text); return true; });
-ipcMain.handle('window:open-floating',(_e,id)=>{createFloating(id);return true;});
-ipcMain.handle('window:toggle-floating-pin',(event)=>{const win=BrowserWindow.fromWebContents(event.sender);if(!win||win.isDestroyed())return false;const pinned=!win.isAlwaysOnTop();win.setAlwaysOnTop(pinned,pinned?'floating':'normal');if(process.platform==='darwin')win.setVisibleOnAllWorkspaces(pinned,{visibleOnFullScreen:pinned});return pinned;});
-ipcMain.handle('window:open-main',(_event,incidentId?:string)=>{if(!mainWindow||mainWindow.isDestroyed())createMainWindow();const win=mainWindow;if(!win)return false;const focusWindow=()=>{if(win.isDestroyed())return;win.show();win.focus();app.focus({steal:true});if(incidentId)win.webContents.send('window:focus-incident',incidentId);};if(win.webContents.isLoading())win.webContents.once('did-finish-load',()=>setTimeout(focusWindow,100));else setTimeout(focusWindow,50);return true;});
-ipcMain.handle('window:close-floating',(_e,id)=>{const w=floatingWindows.get(id);if(w)w.close();});
-ipcMain.handle('notifications:show',(_e,{title,body})=>{if(Notification.isSupported())new Notification({title,body}).show();});
-ipcMain.handle('excel:import',async(_e,filePath)=>{
+handleAppIpc('templates:list',()=>db.prepare('SELECT * FROM templates WHERE active=1 ORDER BY display_order').all());
+handleAppIpc('templates:copy',(_e,text)=>{ if(typeof text!=='string'||text.length>50000)throw new Error('Template text is invalid or too large.'); require('electron').clipboard.writeText(text); return true; });
+handleAppIpc('window:open-floating',(_e,id)=>{createFloating(id);return true;});
+handleAppIpc('window:toggle-floating-pin',(event)=>{const win=BrowserWindow.fromWebContents(event.sender);if(!win||win.isDestroyed())return false;const pinned=!win.isAlwaysOnTop();win.setAlwaysOnTop(pinned,pinned?'floating':'normal');if(process.platform==='darwin')win.setVisibleOnAllWorkspaces(pinned,{visibleOnFullScreen:pinned});return pinned;});
+handleAppIpc('window:open-main',(_event,incidentId?:string)=>{if(!mainWindow||mainWindow.isDestroyed())createMainWindow();const win=mainWindow;if(!win)return false;const focusWindow=()=>{if(win.isDestroyed())return;win.show();win.focus();app.focus({steal:true});if(incidentId)win.webContents.send('window:focus-incident',incidentId);};if(win.webContents.isLoading())win.webContents.once('did-finish-load',()=>setTimeout(focusWindow,100));else setTimeout(focusWindow,50);return true;});
+handleAppIpc('window:close-floating',(_e,id)=>{const w=floatingWindows.get(id);if(w)w.close();});
+handleAppIpc('notifications:show',(_e,{title,body})=>{if(Notification.isSupported())new Notification({title,body}).show();});
+handleAppIpc('excel:import',async(_e,filePath)=>{
+  // Copy imports to the managed workbook so future launches use the same configuration.
   const result=await importWorkbookFile(filePath);
   if(resolve(filePath)!==resolve(configWorkbookPath())) copyFileSync(filePath,configWorkbookPath());
   setActiveWorkbookPath(filePath);
@@ -410,7 +490,7 @@ ipcMain.handle('excel:import',async(_e,filePath)=>{
   broadcastConfigUpdated(result);
   return result;
 });
-ipcMain.handle('excel:choose-import',async()=>{
+handleAppIpc('excel:choose-import',async()=>{
   const {dialog}=require('electron');
   const result=await dialog.showOpenDialog({properties:['openFile'],filters:[{name:'Excel Workbook',extensions:['xlsx']}]});
   if(result.canceled||!result.filePaths[0])return {canceled:true};
@@ -422,10 +502,10 @@ ipcMain.handle('excel:choose-import',async()=>{
   broadcastConfigUpdated(imported);
   return {canceled:false,...imported,path:resolve(filePath)};
 });
-ipcMain.handle('excel:config-path',()=>getActiveWorkbookPath());
-ipcMain.handle('excel:open-config-folder',async()=>{const p=getActiveWorkbookPath();await shell.openPath(dirname(p));return p;});
-ipcMain.handle('excel:reload-config',async()=>{const p=getActiveWorkbookPath();if(!existsSync(p))throw new Error(`Configuration workbook not found: ${p}`);const result=await importWorkbookFile(p);if(resolve(p)!==resolve(configWorkbookPath()))copyFileSync(p,configWorkbookPath());broadcastConfigUpdated(result);return result;});
-ipcMain.handle('excel:export-template',async()=>{
+handleAppIpc('excel:config-path',()=>getActiveWorkbookPath());
+handleAppIpc('excel:open-config-folder',async()=>{const p=getActiveWorkbookPath();await shell.openPath(dirname(p));return p;});
+handleAppIpc('excel:reload-config',async()=>{const p=getActiveWorkbookPath();if(!existsSync(p))throw new Error(`Configuration workbook not found: ${p}`);const result=await importWorkbookFile(p);if(resolve(p)!==resolve(configWorkbookPath()))copyFileSync(p,configWorkbookPath());broadcastConfigUpdated(result);return result;});
+handleAppIpc('excel:export-template',async()=>{
   const {dialog}=require('electron');
   const result=await dialog.showSaveDialog({defaultPath:configWorkbookPath(),filters:[{name:'Excel Workbook',extensions:['xlsx']}]});
   if(result.canceled||!result.filePath)return {canceled:true};
@@ -453,6 +533,16 @@ ipcMain.handle('excel:export-template',async()=>{
   ]);
   await wb.xlsx.writeFile(result.filePath); return {canceled:false,path:result.filePath};
 });
-app.whenReady().then(async()=>{initDb();await loadStartupWorkbook();watchConfigWorkbook();createMainWindow();app.on('activate',()=>{if(BrowserWindow.getAllWindows().length===0)createMainWindow();});});
+// Initialize storage and configuration before showing the UI, so its first requests see loaded data.
+app.whenReady().then(async()=>{
+  // No embedded web content needs browser permissions; notifications use Electron's native API.
+  session.defaultSession.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));
+  session.defaultSession.setPermissionCheckHandler(()=>false);
+  initDb();
+  await loadStartupWorkbook();
+  watchConfigWorkbook();
+  createMainWindow();
+  app.on('activate',()=>{if(BrowserWindow.getAllWindows().length===0)createMainWindow();});
+});
 app.on('window-all-closed',()=>{if(process.platform!=='darwin')app.quit();});
 app.on('before-quit',()=>{try{db?.close();}catch{}});

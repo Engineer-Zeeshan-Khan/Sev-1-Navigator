@@ -1,4 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
+
+// Publish a small, explicit API instead of giving the renderer direct Node or Electron access.
 contextBridge.exposeInMainWorld('api', {
   listIncidents:()=>ipcRenderer.invoke('incidents:list'),
   createIncident:(data:any)=>ipcRenderer.invoke('incidents:create',data),
@@ -6,22 +8,15 @@ contextBridge.exposeInMainWorld('api', {
   completeTask:(data:any)=>ipcRenderer.invoke('tasks:complete',data),
   resolveIncident:(id:string)=>ipcRenderer.invoke('incidents:resolve',id),
   listTools:()=>ipcRenderer.invoke('tools:list'),
-  saveTool:(data:any)=>ipcRenderer.invoke('tools:save',data),
   openTool:(url:string)=>ipcRenderer.invoke('tools:open',url),
   listTemplates:()=>ipcRenderer.invoke('templates:list'),
-  saveTemplate:(data:any)=>ipcRenderer.invoke('templates:save',data),
   copyTemplate:(text:string)=>ipcRenderer.invoke('templates:copy',text),
   openFloating:(id:string)=>ipcRenderer.invoke('window:open-floating',id),
   toggleFloatingPin:()=>ipcRenderer.invoke('window:toggle-floating-pin'),
   openMain:(incidentId?:string)=>ipcRenderer.invoke('window:open-main',incidentId),
   closeFloating:(id:string)=>ipcRenderer.invoke('window:close-floating',id),
   notify:(data:any)=>ipcRenderer.invoke('notifications:show',data),
-  importExcel:(path:string)=>ipcRenderer.invoke('excel:import',path),
-  chooseAndImportExcel:()=>ipcRenderer.invoke('excel:choose-import'),
-  getConfigPath:()=>ipcRenderer.invoke('excel:config-path'),
-  openConfigFolder:()=>ipcRenderer.invoke('excel:open-config-folder'),
-  reloadConfig:()=>ipcRenderer.invoke('excel:reload-config'),
-  exportExcelTemplate:()=>ipcRenderer.invoke('excel:export-template'),
+  // Each event subscription returns a cleanup function so React effects can prevent duplicate listeners.
   onTasksUpdated:(callback:(incidentId:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,id:string)=>void=(_event,id)=>callback(id);ipcRenderer.on('tasks:updated',listener);return()=>ipcRenderer.removeListener('tasks:updated',listener);},
   onIncidentsUpdated:(callback:(incidentId:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,id:string)=>void=(_event,id)=>callback(id);ipcRenderer.on('incidents:updated',listener);return()=>ipcRenderer.removeListener('incidents:updated',listener);},
   onFocusIncident:(callback:(incidentId:string)=>void)=>{const listener:(_:Electron.IpcRendererEvent,id:string)=>void=(_event,id)=>callback(id);ipcRenderer.on('window:focus-incident',listener);return()=>ipcRenderer.removeListener('window:focus-incident',listener);},

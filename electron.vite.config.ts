@@ -8,6 +8,7 @@ export default defineConfig({
       outDir: 'out/main',
       rollupOptions: {
         input: 'src/main/index.ts',
+        // Native addons are loaded by Electron at runtime and cannot be bundled as browser code.
         external: ['better-sqlite3']
       }
     }

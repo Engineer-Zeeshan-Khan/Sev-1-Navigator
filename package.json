@@ -12,30 +12,42 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1",
+    "better-sqlite3": "^13.2.0",
     "exceljs": "^4.4.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "zod": "^3.24.1",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
-    "@electron/rebuild": "^4.2.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.5",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
     "electron-vite": "^3.0.0",
     "typescript": "^5.7.3",
     "vite": "^6.0.7"
   },
+  "overrides": {
+    "minimatch": "^11.0.1",
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
+  },
   "build": {
     "appId": "com.local.sev1commandcenter",
     "productName": "Sev-1 Navigator",
+    "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
     "files": [
       "out/**/*",
       "package.json",
@@ -43,6 +55,7 @@
     ],
     "mac": {
       "icon": "build/icon.icns",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
         "pkg"
       ]
