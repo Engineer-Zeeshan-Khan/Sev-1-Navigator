@@ -1,14 +1,15 @@
 import { app, BrowserWindow, ipcMain, shell, Notification } from 'electron';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import ExcelJS from 'exceljs';
-import { existsSync, mkdirSync, copyFileSync, watch, FSWatcher } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, watch, watchFile, unwatchFile, FSWatcher } from 'node:fs';
 
 let db: Database.Database;
 let mainWindow: BrowserWindow | null = null;
 let floatingWindows = new Map<string, BrowserWindow>();
 let configWatcher: FSWatcher | null = null;
 let configReloadTimer: NodeJS.Timeout | null = null;
+let watchedWorkbookPath: string | null = null;
 
 function broadcast(channel: string, payload: unknown) {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -21,23 +22,31 @@ function broadcastConfigUpdated(result: unknown) {
 }
 
 function watchConfigWorkbook() {
-  const target = configWorkbookPath();
+  const target = getActiveWorkbookPath();
   try {
     configWatcher?.close();
-    configWatcher = watch(app.getPath('userData'), (_event, filename) => {
-      if (filename && String(filename) !== 'SEV1-Command-Center-Configuration.xlsx') return;
+    if (watchedWorkbookPath) unwatchFile(watchedWorkbookPath);
+    const scheduleReload = () => {
       if (configReloadTimer) clearTimeout(configReloadTimer);
       configReloadTimer = setTimeout(async () => {
         if (!existsSync(target)) return;
         try {
           const result = await importWorkbookFile(target);
+          if (resolve(target) !== resolve(configWorkbookPath())) copyFileSync(target, configWorkbookPath());
           broadcastConfigUpdated(result);
         } catch (error) {
           console.error('Configuration workbook was not applied:', error);
           broadcast('config:error', error instanceof Error ? error.message : String(error));
         }
-      }, 700);
+      }, 900);
+    };
+    configWatcher = watch(dirname(target), (_event, filename) => {
+      if (!filename || String(filename) === basename(target)) scheduleReload();
     });
+    watchFile(target, { interval: 700, persistent: false }, (current, previous) => {
+      if (current.mtimeMs !== previous.mtimeMs || current.size !== previous.size) scheduleReload();
+    });
+    watchedWorkbookPath = target;
   } catch (error) {
     console.error('Could not watch configuration workbook:', error);
   }
@@ -46,6 +55,15 @@ function watchConfigWorkbook() {
 
 function configWorkbookPath() {
   return join(app.getPath('userData'), 'SEV1-Command-Center-Configuration.xlsx');
+}
+
+function getActiveWorkbookPath() {
+  const saved = db.prepare("SELECT value FROM app_settings WHERE key='workbook_path'").get() as {value:string}|undefined;
+  return saved?.value || configWorkbookPath();
+}
+
+function setActiveWorkbookPath(filePath: string) {
+  db.prepare("INSERT INTO app_settings (key,value) VALUES ('workbook_path',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(resolve(filePath));
 }
 
 function safeSqliteInsert(
@@ -195,13 +213,21 @@ const parse = (ws: ExcelJS.Worksheet) => {
   return {activities:acts.length,tools:tools.length,templates:temps.length};
 }
 async function loadStartupWorkbook() {
-  const target=configWorkbookPath();
-  if(!existsSync(target)) {
+  const managed=configWorkbookPath();
+  const saved=db.prepare("SELECT value FROM app_settings WHERE key='workbook_path'").get() as {value:string}|undefined;
+  const developmentWorkbook=join(app.getAppPath(),'SEV1-Command-Center-Configuration.xlsx');
+  let target=saved?.value?resolve(saved.value):(process.env.ELECTRON_RENDERER_URL&&existsSync(developmentWorkbook)?developmentWorkbook:managed);
+  if(!existsSync(managed)) {
     const bundled=join(app.getAppPath(),'SEV1-Command-Center-Configuration.xlsx');
-    if(existsSync(bundled)) copyFileSync(bundled,target);
+    if(existsSync(bundled)) copyFileSync(bundled,managed);
   }
+  if(!existsSync(target)) target=managed;
+  setActiveWorkbookPath(target);
   if(existsSync(target)) {
-    try { await importWorkbookFile(target); }
+    try {
+      await importWorkbookFile(target);
+      if(resolve(target)!==resolve(managed))copyFileSync(target,managed);
+    }
     catch(error) { console.error('Configuration workbook was not applied:',error); }
   }
 }
@@ -216,7 +242,8 @@ function initDb() {
     CREATE TABLE IF NOT EXISTS incidents (
       id TEXT PRIMARY KEY, title TEXT NOT NULL, severity TEXT NOT NULL,
       start_at INTEGER NOT NULL, sla_minutes INTEGER NOT NULL,
-      status TEXT NOT NULL DEFAULT 'active', end_at INTEGER
+      status TEXT NOT NULL DEFAULT 'active', end_at INTEGER,
+      incident_number TEXT NOT NULL DEFAULT '', organization TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS incident_tasks (
       id TEXT PRIMARY KEY, incident_id TEXT NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
@@ -245,6 +272,11 @@ function initDb() {
       occurred_at INTEGER NOT NULL, event_type TEXT NOT NULL, details TEXT
     );
   `);
+  const incidentColumns=db.prepare('PRAGMA table_info(incidents)').all() as {name:string}[];
+  if(!incidentColumns.some(column=>column.name==='incident_number'))db.exec("ALTER TABLE incidents ADD COLUMN incident_number TEXT NOT NULL DEFAULT ''");
+  if(!incidentColumns.some(column=>column.name==='organization'))db.exec("ALTER TABLE incidents ADD COLUMN organization TEXT NOT NULL DEFAULT ''");
+  db.prepare("UPDATE incidents SET incident_number=id WHERE incident_number IS NULL OR incident_number=''").run();
+  db.prepare("DELETE FROM incidents WHERE id NOT IN (SELECT id FROM incidents ORDER BY start_at DESC,id DESC LIMIT 10)").run();
   const count = db.prepare('SELECT COUNT(*) n FROM activities').get() as {n:number};
   if (!count.n) {
     const defaults = [
@@ -301,10 +333,11 @@ function createFloating(incidentId: string) {
   if (existing && !existing.isDestroyed()) { existing.show(); existing.focus(); return; }
   const win = new BrowserWindow({
     width: 240, height: 360, minWidth: 210, minHeight: 300,
-    frame: false, transparent: true, resizable: true, alwaysOnTop: false,
+    frame: false, transparent: true, resizable: true, alwaysOnTop: true,
     skipTaskbar: true, hasShadow: true,
     webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
+  if(process.platform==='darwin')win.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true});
   floatingWindows.set(incidentId, win);
   win.on('closed',()=>floatingWindows.delete(incidentId));
   const url = process.env.ELECTRON_RENDERER_URL;
@@ -314,15 +347,19 @@ function createFloating(incidentId: string) {
 
 ipcMain.handle('incidents:list',()=>db.prepare("SELECT * FROM incidents ORDER BY start_at DESC").all());
 ipcMain.handle('incidents:create',(_e,input)=>{
+  const incidentNumber=String(input.incidentNumber||'').trim();
+  const organization=String(input.organization||'').trim();
+  if(!incidentNumber||!organization)throw new Error('Incident number and organization name are required.');
   const id = `SEV1-${Date.now()}`;
   const start = Date.now();
   const tx = db.transaction(()=>{
-    db.prepare('INSERT INTO incidents (id,title,severity,start_at,sla_minutes,status) VALUES (?,?,?,?,?,?)')
-      .run(id,input.title || 'SEV1 Incident',input.severity || 'SEV1',start,Number(input.slaMinutes)||60,'active');
+    db.prepare('INSERT INTO incidents (id,title,severity,start_at,sla_minutes,status,incident_number,organization) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id,input.title || incidentNumber,input.severity || 'SEV1',start,Number(input.slaMinutes)||60,'active',incidentNumber,organization);
     const rows = db.prepare('SELECT * FROM activities WHERE active=1 ORDER BY display_order').all() as any[];
     const ins = db.prepare('INSERT INTO incident_tasks (id,incident_id,source_task_id,due_minutes,name,description,mandatory,phase) VALUES (?,?,?,?,?,?,?,?)');
     rows.forEach((r:any,i:number)=>ins.run(`${id}-TASK-${i+1}`,id,r.id,r.due_minutes,r.name,r.description,r.mandatory,r.phase));
     db.prepare('INSERT INTO incident_events VALUES (?,?,?,?,?)').run(`${id}-EVENT-1`,id,start,'incident_started','Incident created');
+    db.prepare("DELETE FROM incidents WHERE id NOT IN (SELECT id FROM incidents ORDER BY start_at DESC,id DESC LIMIT 10)").run();
   });
   tx(); return db.prepare('SELECT * FROM incidents WHERE id=?').get(id);
 });
@@ -368,6 +405,8 @@ ipcMain.handle('notifications:show',(_e,{title,body})=>{if(Notification.isSuppor
 ipcMain.handle('excel:import',async(_e,filePath)=>{
   const result=await importWorkbookFile(filePath);
   if(resolve(filePath)!==resolve(configWorkbookPath())) copyFileSync(filePath,configWorkbookPath());
+  setActiveWorkbookPath(filePath);
+  watchConfigWorkbook();
   broadcastConfigUpdated(result);
   return result;
 });
@@ -378,12 +417,14 @@ ipcMain.handle('excel:choose-import',async()=>{
   const filePath=result.filePaths[0];
   const imported=await importWorkbookFile(filePath);
   if(resolve(filePath)!==resolve(configWorkbookPath()))copyFileSync(filePath,configWorkbookPath());
+  setActiveWorkbookPath(filePath);
+  watchConfigWorkbook();
   broadcastConfigUpdated(imported);
-  return {canceled:false,...imported,path:configWorkbookPath()};
+  return {canceled:false,...imported,path:resolve(filePath)};
 });
-ipcMain.handle('excel:config-path',()=>configWorkbookPath());
-ipcMain.handle('excel:open-config-folder',async()=>{await shell.openPath(app.getPath('userData'));return configWorkbookPath();});
-ipcMain.handle('excel:reload-config',async()=>{const p=configWorkbookPath();if(!existsSync(p))throw new Error('Configuration workbook not found in the application data folder.');const result=await importWorkbookFile(p);broadcastConfigUpdated(result);return result;});
+ipcMain.handle('excel:config-path',()=>getActiveWorkbookPath());
+ipcMain.handle('excel:open-config-folder',async()=>{const p=getActiveWorkbookPath();await shell.openPath(dirname(p));return p;});
+ipcMain.handle('excel:reload-config',async()=>{const p=getActiveWorkbookPath();if(!existsSync(p))throw new Error(`Configuration workbook not found: ${p}`);const result=await importWorkbookFile(p);if(resolve(p)!==resolve(configWorkbookPath()))copyFileSync(p,configWorkbookPath());broadcastConfigUpdated(result);return result;});
 ipcMain.handle('excel:export-template',async()=>{
   const {dialog}=require('electron');
   const result=await dialog.showSaveDialog({defaultPath:configWorkbookPath(),filters:[{name:'Excel Workbook',extensions:['xlsx']}]});
